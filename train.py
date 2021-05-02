@@ -18,6 +18,23 @@ import copy
 import pickle, random, json
 from evaluation import *
 
+use_aws = True
+
+if use_aws:
+    # S3 and SageMaker
+    import sagemaker
+    from sagemaker import get_execution_role
+    import io
+    import boto3
+
+    sagemaker_session = sagemaker.Session()
+    role = get_execution_role()
+    print(role)
+    s3 = boto3.resource('s3')
+    bucket_name = 'schen5-bucket01'
+    bucket = s3.Bucket(bucket_name)
+    prefix = 'train'
+
 plt.ion()   # interactive mode
 
 ######################################################################
@@ -38,8 +55,12 @@ def make_labels():
         for v in scores.values():
             out += v
         return np.mean(out)
-    labels_path = os.path.join(data_dir, 'labels.json')
-    labels_dic = json.load(open(labels_path, 'rb'))
+    if use_aws:
+        response = s3.Object(bucket_name, 'labels.json').get()['Body'].read()
+        labels_dic = json.loads(response)
+    else:
+        labels_path = os.path.join(data_dir, 'labels.json')
+        labels_dic = json.load(open(labels_path, 'rb'))
     out = {}
     for file_name, scores in labels_dic.items():
         pinch = mean(scores['pinch'])
@@ -66,23 +87,38 @@ def accimage_loader(path):
         return pil_loader(path)
 
 def default_loader(path):
-    from torchvision import get_image_backend
-    if get_image_backend() == 'accimage':
-        return accimage_loader(path)
+    if use_aws:
+        img_bytes = s3.Object(bucket_name, path).get()['Body'].read()
+        # e.g. path: 'train/21JBED3YWoL._AC_.png'
+        return Image.open(io.BytesIO(img_bytes)).convert('RGB')
     else:
-        return pil_loader(path)
+        from torchvision import get_image_backend
+        if get_image_backend() == 'accimage':
+            return accimage_loader(path)
+        else:
+            return pil_loader(path)
+
 
 def make_dataset(directory, labels_dic):
     images = []
-    print(directory)
-    for root, _, fnames in sorted(os.walk(directory)):
-        for fname in fnames:
-            path = os.path.join(root, fname)
+    if use_aws:
+        for object_summary in bucket.objects.filter(Prefix=directory):
+            path = object_summary.key
+            fname = object_summary.key[len(directory)+1:-4]
             try:
-                item = (path, labels_dic[fname[:-4]]) # remove .png
+                item = (path, labels_dic[fname])
                 images.append(item)
             except:
                 continue
+    else:
+        for root, _, fnames in sorted(os.walk(directory)):
+            for fname in fnames:
+                path = os.path.join(root, fname)
+                try:
+                    item = (path, labels_dic[fname[:-4]]) # remove .png
+                    images.append(item)
+                except:
+                    continue
     print(len(images))
     random.Random(4).shuffle(images)
     return images
@@ -203,12 +239,19 @@ data_dir = '/Users/sharon/data/EE148/affordance/Data/'
 ckpt_dir = './ckpt/'
 
 def run(n): # n is the CV fold idx
-    images = DatasetFolder(os.path.join(data_dir, 'train'), data_transforms['train'])
+    if use_aws:
+        images = DatasetFolder('train', data_transforms['train'])
+    else:
+        images = DatasetFolder(os.path.join(data_dir, 'train'), data_transforms['train'])
     print('sharon')
     print(len(images))
     image_datasets = make_splitted_images(images, n)
     #dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=1, shuffle=False, num_workers=1)
-    dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=32, shuffle=True, num_workers=0)
+    if use_aws:
+        num_workers = 4
+    else:
+        num_workers = 0
+    dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=32, shuffle=True, num_workers=num_workers)
                   for x in ['train', 'val']}
     dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
 
