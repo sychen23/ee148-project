@@ -22,14 +22,14 @@ use_aws = True
 
 if use_aws:
     # S3 and SageMaker
-    import sagemaker
-    from sagemaker import get_execution_role
+#     import sagemaker
+#     from sagemaker import get_execution_role
     import io
     import boto3
 
-    sagemaker_session = sagemaker.Session()
-    role = get_execution_role()
-    print(role)
+#     sagemaker_session = sagemaker.Session()
+#     role = get_execution_role()
+#     print(role)
     s3 = boto3.resource('s3')
     bucket_name = 'schen5-bucket01'
     bucket = s3.Bucket(bucket_name)
