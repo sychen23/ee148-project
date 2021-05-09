@@ -16,7 +16,13 @@ import time
 import os
 import copy
 import pickle, random, json
-from evaluation import *
+from sklearn.metrics import accuracy_score
+from scipy.stats import pearsonr
+
+median_pinch = 62.
+median_clench = 75.
+median_poke = 48.
+median_palm = 46.
 
 use_aws = True
 
@@ -31,11 +37,74 @@ if use_aws:
 #     role = get_execution_role()
 #     print(role)
     s3 = boto3.resource('s3')
-    bucket_name = 'schen5-bucket01'
+    bucket_name = 'schen5-bucket03'
     bucket = s3.Bucket(bucket_name)
-    prefix = 'train'
+    prefix = 'affordance_data'
 
 plt.ion()   # interactive mode
+
+
+def score_evaluation_from_np_batches(score_label, score_pred):
+    '''
+    Input
+    - score_label: batch_size x 4 np array of ground truth affordance scores
+    - score_pred: batch_size x 4 np array of predicted affordance scores
+
+    First to fourth columns are pinch, clench, poke and palm scores each
+
+    Return
+    - averge MSE, average pearson correlation, average accuracy
+    '''
+    batch_size = len(score_label)
+
+    mse = ((score_label - score_pred)**2).mean(axis=0)
+
+    pinch_mse = mse[0]
+    clench_mse = mse[1]
+    poke_mse = mse[2]
+    palm_mse = mse[3]
+
+    pinch_corr = pearsonr(score_label[:, 0], score_pred[:, 0])
+    clench_corr = pearsonr(score_label[:, 1], score_pred[:, 1])
+    poke_corr = pearsonr(score_label[:, 2], score_pred[:, 2])
+    palm_corr = pearsonr(score_label[:, 3], score_pred[:, 3])
+
+    binarized_label = np.zeros((batch_size, 4))
+    binarized_pred = np.zeros((batch_size, 4))
+
+    binarized_label[:, 0] = score_label[:, 0] > median_pinch
+    binarized_label[:, 1] = score_label[:, 1] > median_clench
+    binarized_label[:, 2] = score_label[:, 2] > median_poke
+    binarized_label[:, 3] = score_label[:, 3] > median_palm
+
+    binarized_pred[:, 0] = score_pred[:, 0] > median_pinch
+    binarized_pred[:, 1] = score_pred[:, 1] > median_clench
+    binarized_pred[:, 2] = score_pred[:, 2] > median_poke
+    binarized_pred[:, 3] = score_pred[:, 3] > median_palm
+
+    pinch_acc = accuracy_score(binarized_label[:, 0], binarized_pred[:, 0])
+    clench_acc = accuracy_score(binarized_label[:, 1], binarized_pred[:, 1])
+    poke_acc = accuracy_score(binarized_label[:, 2], binarized_pred[:, 2])
+    palm_acc = accuracy_score(binarized_label[:, 3], binarized_pred[:, 3])
+
+    print("=====MSE=====")
+    print("Pinch: ", pinch_mse, "Clench: ", clench_mse, "Poke: ", poke_mse, "Palm: ", palm_mse)
+    mean_mse = np.mean(mse)
+    print("Average: ", mean_mse)
+
+    print("=====Corr=====")
+    print("Pinch: ", pinch_corr, "Clench: ", clench_corr, "Poke: ", poke_corr, "Palm: ", palm_corr)
+    mean_corr = np.mean([pinch_corr[0], clench_corr[0], poke_corr[0], palm_corr[0]])
+    print("Average: ", mean_corr)
+
+    print("=====Acc=====")
+    print("Pinch: ", pinch_acc, "Clench: ", clench_acc, "Poke: ", poke_acc, "Palm: ", palm_acc)
+    mean_acc = np.mean([pinch_acc, clench_acc, poke_acc, palm_acc])
+    print("Average: ", mean_acc)
+
+    return mean_mse, mean_corr, mean_acc
+
+
 
 ######################################################################
 # Load Data
@@ -56,7 +125,7 @@ def make_labels():
             out += v
         return np.mean(out)
     if use_aws:
-        response = s3.Object(bucket_name, 'labels.json').get()['Body'].read()
+        response = s3.Object(bucket_name, f'{prefix}/labels.json').get()['Body'].read()
         labels_dic = json.loads(response)
     else:
         labels_path = os.path.join(data_dir, 'labels.json')
@@ -89,7 +158,7 @@ def accimage_loader(path):
 def default_loader(path):
     if use_aws:
         img_bytes = s3.Object(bucket_name, path).get()['Body'].read()
-        # e.g. path: 'train/21JBED3YWoL._AC_.png'
+        # e.g. path: 'affordance_data/train/21JBED3YWoL._AC_.png'
         return Image.open(io.BytesIO(img_bytes)).convert('RGB')
     else:
         from torchvision import get_image_backend
@@ -236,11 +305,11 @@ class affordance_model(nn.Module):
 
 
 data_dir = '/Users/sharon/data/EE148/affordance/Data/'
-ckpt_dir = './ckpt/'
+ckpt_dir = '~/SageMaker/ee148-project/ckpt/'#'./ckpt/'
 
 def run(n): # n is the CV fold idx
     if use_aws:
-        images = DatasetFolder('train', data_transforms['train'])
+        images = DatasetFolder(f'{prefix}/train', data_transforms['train'])
     else:
         images = DatasetFolder(os.path.join(data_dir, 'train'), data_transforms['train'])
     print('sharon')
@@ -248,7 +317,7 @@ def run(n): # n is the CV fold idx
     image_datasets = make_splitted_images(images, n)
     #dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=1, shuffle=False, num_workers=1)
     if use_aws:
-        num_workers = 4
+        num_workers = 1
     else:
         num_workers = 0
     dataloaders = {x: torch.utils.data.DataLoader(image_datasets[x], batch_size=32, shuffle=True, num_workers=num_workers)
@@ -334,9 +403,7 @@ def run(n): # n is the CV fold idx
 
                 running_loss = 0.0
 
-                sharon = 0
                 # Iterate over data.
-                print(len(dataloaders[phase]))
                 for inputs, labels in dataloaders[phase]:
                     inputs = inputs.to(device)
                     obj_size = labels[:, -1].to(device)
@@ -347,8 +414,6 @@ def run(n): # n is the CV fold idx
 
                     # forward
                     # track history if only in train
-                    print(sharon)
-                    sharon += 1
                     with torch.set_grad_enabled(phase == 'train'):
                         pinch, clench, poke, palm = model(inputs, obj_size)
 
@@ -382,7 +447,7 @@ def run(n): # n is the CV fold idx
                 else:
                     if epoch_loss < best_loss:
                         best_loss = epoch_loss
-                        torch.save(model, os.path.join(ckpt_dir, '{}_fold_best.ckpt'.format(n)))
+                        #torch.save(model, os.path.join('', '{}_fold_best.ckpt'.format(n)))
                         best_model_wts = copy.deepcopy(model.state_dict())
                         test_model(model)
                         no_update_count = 0
